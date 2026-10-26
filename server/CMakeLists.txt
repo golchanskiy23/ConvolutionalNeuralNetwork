@@ -17,7 +17,6 @@ target_include_directories(server PRIVATE third_party)
 
 target_link_libraries(server
         ${TORCH_LIBRARIES}
-        -lboost_thread
         Threads::Threads
 )
 # LibTorch 2.x требует C++20

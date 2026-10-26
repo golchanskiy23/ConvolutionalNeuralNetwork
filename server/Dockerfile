@@ -10,7 +10,6 @@ RUN apt-get update && apt-get install -y \
     unzip \
     ca-certificates \
     libboost-dev \
-    libboost-thread-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # LibTorch (CPU). Версия должна совпадать с PyTorch, которым сохранена модель
@@ -31,7 +30,7 @@ RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/opt/libt
 
 FROM ubuntu:24.04
 
-RUN apt-get update && apt-get install -y libboost-thread1.83.0 libgomp1 \
+RUN apt-get update && apt-get install -y libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Библиотеки LibTorch по тому же пути, что и при сборке (RPATH)

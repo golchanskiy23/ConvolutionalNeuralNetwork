@@ -25,10 +25,13 @@ def parse_args():
 
 
 # Преобразования изображений для нормализации
-# (сервер повторяет их в ImageClassifier::preprocess, при изменении править в обоих местах)
+# (сервер повторяет 'valid' в ImageClassifier::preprocess, при изменении править в обоих местах)
 data_transforms = {
+    # Аугментации только для обучения
     'train': transforms.Compose([
         transforms.Resize((224, 224)),
+        transforms.RandomHorizontalFlip(),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ]),
@@ -114,6 +117,30 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs):
     return model
 
 
+# Оценка на test. Учитываются только классы, на которых модель обучалась
+# (в arch/test 525 классов, а в arch/train - 2)
+def evaluate_test(model, test_dir, class_names):
+    test_dataset = datasets.ImageFolder(test_dir, data_transforms['valid'])
+    class_index = {name: i for i, name in enumerate(class_names)}
+    indices = [i for i, (_, label) in enumerate(test_dataset.samples)
+               if test_dataset.classes[label] in class_index]
+    if not indices:
+        print('No test images for trained classes')
+        return
+
+    loader = torch.utils.data.DataLoader(torch.utils.data.Subset(test_dataset, indices), batch_size=16, num_workers=4)
+    model.eval()
+    corrects = 0
+    with torch.no_grad():
+        for inputs, labels in loader:
+            # Индексы классов test -> индексы классов train
+            labels = torch.tensor([class_index[test_dataset.classes[l]] for l in labels.tolist()])
+            outputs = model(inputs.to(device))
+            corrects += torch.sum(outputs.argmax(1).cpu() == labels).item()
+
+    print(f'Test Acc: {corrects / len(indices):.4f} ({corrects}/{len(indices)})')
+
+
 # Сохранение модели в TorchScript и списка классов для C++ сервера
 def export_model(model, class_names, out_dir):
     os.makedirs(out_dir, exist_ok=True)
@@ -140,6 +167,9 @@ if __name__ == '__main__':
 
     # Загрузка предварительно обученной модели ResNet-18
     model_ft = models.resnet18(weights='IMAGENET1K_V1')
+    # Замораживаем свёрточную часть: обучается только новый fc, backward через всю сеть не нужен
+    for param in model_ft.parameters():
+        param.requires_grad = False
     num_ftrs = model_ft.fc.in_features
     model_ft.fc = nn.Linear(num_ftrs, len(class_names))
 
@@ -155,6 +185,10 @@ if __name__ == '__main__':
 
     # Обучение и оценка модели
     model_ft = train_model(model_ft, criterion, optimizer_ft, exp_lr_scheduler, num_epochs=args.epochs)
+
+    test_dir = os.path.join(args.data_dir, 'test')
+    if os.path.isdir(test_dir):
+        evaluate_test(model_ft, test_dir, class_names)
 
     export_model(model_ft, class_names, args.out_dir)
 
