@@ -1,0 +1,34 @@
+# --- C++ / CMake ---
+cmake-build-*/
+build/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.o
+*.a
+*.so
+
+# Собранные бинарники сервера
+server/main
+server/server
+
+# --- IDE ---
+.idea/
+.vscode/
+*.iml
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# Веса, полученные при обучении
+*.pt
+*.pth
+
+# --- OS ---
+.DS_Store
+Thumbs.db
