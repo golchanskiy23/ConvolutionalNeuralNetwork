@@ -9,15 +9,23 @@ from torchvision import datasets, models, transforms
 import matplotlib.pyplot as plt
 import time
 import os
+import argparse
 from PIL import Image
 from tempfile import TemporaryDirectory
 
-# Предположим, что данные располагаются в каталогах 'train' и 'valid'
-data_dir = ('arch')
-train_dir = os.path.join(data_dir, 'train')
-valid_dir = os.path.join(data_dir, 'valid')
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='Дообучение ResNet-18 и экспорт модели для C++ сервера')
+    # Предположим, что данные располагаются в каталогах 'train' и 'valid'
+    parser.add_argument('--data-dir', default='arch', help='каталог с подкаталогами train/ и valid/')
+    parser.add_argument('--epochs', type=int, default=25)
+    parser.add_argument('--out-dir', default=os.path.join('..', 'server', 'model'),
+                        help='куда сохранить model.pt и classes.txt')
+    return parser.parse_args()
+
 
 # Преобразования изображений для нормализации
+# (сервер повторяет их в ImageClassifier::preprocess, при изменении править в обоих местах)
 data_transforms = {
     'train': transforms.Compose([
         transforms.Resize((224, 224)),
@@ -31,27 +39,9 @@ data_transforms = {
     ]),
 }
 
-image_datasets = {x: datasets.ImageFolder(os.path.join(data_dir, x), data_transforms[x]) for x in ['train', 'valid']}
-dataloaders = {x: torch.utils.data.DataLoader(image_datasets[x], batch_size=4, shuffle=True, num_workers=4) for x in ['train', 'valid']}
-dataset_sizes = {x: len(image_datasets[x]) for x in ['train', 'valid']}
-class_names = image_datasets['train'].classes
-
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-# Загрузка предварительно обученной модели ResNet-18
-model_ft = models.resnet18(weights='IMAGENET1K_V1')
-num_ftrs = model_ft.fc.in_features
-model_ft.fc = nn.Linear(num_ftrs, 525)
 
-model_ft = model_ft.to(device)
-
-criterion = nn.CrossEntropyLoss()
-
-# Обучение только последнего слоя (классификатора)
-optimizer_ft = optim.SGD(model_ft.fc.parameters(), lr=0.001, momentum=0.9)
-
-# Уменьшение скорости обучения на 7 эпохе на 10x
-exp_lr_scheduler = lr_scheduler.StepLR(optimizer_ft, step_size=7, gamma=0.1)
 # Обучение модели
 def train_model(model, criterion, optimizer, scheduler, num_epochs):
     since = time.time()
@@ -124,7 +114,48 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs):
     return model
 
 
-# Обучение и оценка модели
-model_ft = train_model(model_ft, criterion, optimizer_ft, exp_lr_scheduler, num_epochs=25)
+# Сохранение модели в TorchScript и списка классов для C++ сервера
+def export_model(model, class_names, out_dir):
+    os.makedirs(out_dir, exist_ok=True)
+    model = model.cpu().eval()
+
+    model_path = os.path.join(out_dir, 'model.pt')
+    torch.jit.script(model).save(model_path)
+
+    # Порядок строк = индекс выхода модели (ImageFolder сортирует классы по имени)
+    classes_path = os.path.join(out_dir, 'classes.txt')
+    with open(classes_path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(class_names) + '\n')
+
+    print(f'Model saved to {model_path}, classes ({len(class_names)}) to {classes_path}')
+
+
+if __name__ == '__main__':
+    args = parse_args()
+
+    image_datasets = {x: datasets.ImageFolder(os.path.join(args.data_dir, x), data_transforms[x]) for x in ['train', 'valid']}
+    dataloaders = {x: torch.utils.data.DataLoader(image_datasets[x], batch_size=4, shuffle=True, num_workers=4) for x in ['train', 'valid']}
+    dataset_sizes = {x: len(image_datasets[x]) for x in ['train', 'valid']}
+    class_names = image_datasets['train'].classes
+
+    # Загрузка предварительно обученной модели ResNet-18
+    model_ft = models.resnet18(weights='IMAGENET1K_V1')
+    num_ftrs = model_ft.fc.in_features
+    model_ft.fc = nn.Linear(num_ftrs, len(class_names))
+
+    model_ft = model_ft.to(device)
+
+    criterion = nn.CrossEntropyLoss()
+
+    # Обучение только последнего слоя (классификатора)
+    optimizer_ft = optim.SGD(model_ft.fc.parameters(), lr=0.001, momentum=0.9)
+
+    # Уменьшение скорости обучения на 7 эпохе на 10x
+    exp_lr_scheduler = lr_scheduler.StepLR(optimizer_ft, step_size=7, gamma=0.1)
+
+    # Обучение и оценка модели
+    model_ft = train_model(model_ft, criterion, optimizer_ft, exp_lr_scheduler, num_epochs=args.epochs)
+
+    export_model(model_ft, class_names, args.out_dir)
 
 

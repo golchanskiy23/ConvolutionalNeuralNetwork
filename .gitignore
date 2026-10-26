@@ -32,3 +32,6 @@ venv/
 # --- OS ---
 .DS_Store
 Thumbs.db
+
+# Экспортированная модель для сервера (model.pt + classes.txt)
+server/model/

@@ -1,13 +1,17 @@
 # ConvolutionalNeuralNetwork
 
-Классификация изображений птиц (525 видов) свёрточной нейросетью с HTTP-интерфейсом.
+Классификация изображений птиц (до 525 видов) свёрточной нейросетью с HTTP-интерфейсом.
 
-Проект состоит из двух независимых частей:
+Проект состоит из двух частей, связанных через файл модели:
 
-| Часть | Язык / стек | Назначение | Состояние |
-|---|---|---|---|
-| `training/` | Python, PyTorch, torchvision | Дообучение ResNet-18 (transfer learning) на датасете птиц | Рабочий скрипт обучения, но веса никуда не сохраняются |
-| `server/` | C++17, Boost.Asio, CMake, Docker | Многопоточный HTTP-сервер, который должен отдавать предсказание модели | Сервер работает, но классификатор — заглушка (код LibTorch закомментирован) |
+| Часть | Язык / стек | Назначение |
+|---|---|---|
+| `training/` | Python, PyTorch, torchvision | Дообучение ResNet-18 (transfer learning) и экспорт модели в TorchScript |
+| `server/` | C++20, LibTorch, Boost.Asio, CMake, Docker | Многопоточный HTTP-сервер: принимает изображение, возвращает класс птицы |
+
+```
+training/classification.py ──► server/model/model.pt + classes.txt ──► server (POST /predict)
+```
 
 ---
 
@@ -16,15 +20,17 @@
 ```
 .
 ├── server/                      # C++ веб-сервис
-│   ├── main.cpp                 # точка входа: io_context + HTTPServer на порту 8001
-│   ├── WebServer.h / .cpp       # ThreadPool и HTTPServer
-│   ├── ImageClassification.h/.cpp  # ImageClassifier (заготовка под LibTorch)
+│   ├── main.cpp                 # точка входа: загрузка модели, HTTPServer на порту 8001
+│   ├── WebServer.h / .cpp       # ThreadPool и HTTPServer (разбор HTTP, маршрут /predict)
+│   ├── ImageClassification.h/.cpp  # ImageClassifier: декодирование, предобработка, инференс LibTorch
+│   ├── third_party/stb_image.h  # декодер JPEG/PNG/BMP/GIF (public domain, один заголовок)
+│   ├── model/                   # сюда обучение кладёт model.pt и classes.txt (в .gitignore)
 │   ├── CMakeLists.txt
 │   ├── Dockerfile
 │   ├── cmake-build-debug/       # артефакты сборки CLion (попали в git)
-│   └── main, server             # собранные бинарники (попали в git)
+│   └── main, server             # старые собранные бинарники (попали в git)
 └── training/                    # обучение модели
-    ├── classification.py        # скрипт обучения ResNet-18
+    ├── classification.py        # обучение ResNet-18 + экспорт модели
     ├── arch/                    # маленький поднабор: train/valid — 2 класса, test — 525 классов
     ├── archive/                 # полный датасет «BIRDS 525 SPECIES» (~2.2 ГБ)
     │   ├── train/ valid/ test/  # по 525 папок-классов
@@ -37,94 +43,101 @@
 
 ## Архитектура
 
-### Общая схема (целевая)
+### Общая схема
 
 ```
- клиент (curl / браузер)
-        │  GET /?<param>=<value>
+ клиент (curl)
+        │  POST /predict, тело = байты изображения
         ▼
  ┌──────────────────────────── server ────────────────────────────┐
- │  boost::asio::io_context  ──►  HTTPServer::start_accept()      │
- │                                    │ async_accept              │
- │                                    ▼                           │
- │                         HTTPServer::handle_accept()            │
- │               занято ≥ 2 потоков? ──да──► 503 Service Unavailable
- │                                    │нет                        │
- │                                    ▼                           │
- │                    ThreadPool::enqueue(handle_request)         │
- │                                    ▼                           │
- │   handle_request: read_some → ImageClassifier::predict()       │
- │                   → getLogic() → HTTP/1.1 200 OK               │
- └────────────────────────────────────────────────────────────────┘
-                                      ▲
-                     веса модели (.pt) │  ← training/classification.py
+ │  main: ImageClassifier(model.pt, classes.txt) — один раз        │
+ │                                                                 │
+ │  boost::asio::io_context  ──►  HTTPServer::start_accept()       │
+ │                                    │ async_accept               │
+ │                                    ▼                            │
+ │                         HTTPServer::handle_accept()             │
+ │               занято ≥ 2 потоков? ──да──► 503 Service Unavailable│
+ │                                    │нет                         │
+ │                                    ▼                            │
+ │                    ThreadPool::enqueue(handle_request)          │
+ │                                    ▼                            │
+ │   handle_request: заголовки + тело (Content-Length)             │
+ │     → getLogic() → ImageClassifier::predict()                   │
+ │     → 200 {"class": "...", "confidence": 0.98}                  │
+ └─────────────────────────────────────────────────────────────────┘
 ```
-
-Сейчас связь «обучение → сервер» не замкнута: скрипт обучения не сохраняет веса на диск, а сервер не подключает LibTorch.
 
 ### training/classification.py — обучение
 
 Классический transfer learning по мотивам официального туториала PyTorch:
 
-1. **Данные.** `datasets.ImageFolder` читает `data_dir/train` и `data_dir/valid` — одна подпапка на класс. Сейчас `data_dir = 'arch'` (маленький поднабор из 2 классов). Для полного датасета нужно указать `'archive'`.
-2. **Предобработка.** `Resize(224, 224)` → `ToTensor()` → `Normalize` со статистиками ImageNet (`mean=[0.485, 0.456, 0.406]`, `std=[0.229, 0.224, 0.225]`). Аугментаций нет, train и valid обрабатываются одинаково.
-3. **Модель.** `torchvision.models.resnet18(weights='IMAGENET1K_V1')` — предобученный на ImageNet ResNet-18. Последний слой `fc` (512 → 1000) заменяется на `nn.Linear(512, 525)`.
-4. **Обучение.**
-   - функция потерь — `CrossEntropyLoss`;
-   - оптимизатор — `SGD(lr=0.001, momentum=0.9)`, обновляется **только `fc`** (оптимизатору передаются `model_ft.fc.parameters()`). Градиенты по свёрточной части при этом всё равно считаются, потому что `requires_grad` у неё не отключён;
-   - `StepLR(step_size=7, gamma=0.1)` — каждые 7 эпох lr делится на 10;
-   - 25 эпох, `batch_size=4`, `num_workers=4`, устройство — `cuda:0`, если доступно, иначе CPU.
-5. **Выбор лучшей модели.** После каждой эпохи считаются loss/accuracy на `valid`. Лучший по точности `state_dict` сохраняется во **временную** директорию (`TemporaryDirectory`) и в конце загружается обратно в модель. После выхода из функции временная директория удаляется — на диске весов не остаётся.
+1. **Данные.** `datasets.ImageFolder` читает `<data-dir>/train` и `<data-dir>/valid` — одна подпапка на класс. По умолчанию `--data-dir arch` (2 класса), для полного датасета — `--data-dir archive`.
+2. **Предобработка.** `Resize(224, 224)` → `ToTensor()` → `Normalize` со статистиками ImageNet (`mean=[0.485, 0.456, 0.406]`, `std=[0.229, 0.224, 0.225]`). Аугментаций нет.
+3. **Модель.** `torchvision.models.resnet18(weights='IMAGENET1K_V1')`, последний слой `fc` заменяется на `nn.Linear(512, <число классов>)`.
+4. **Обучение.** `CrossEntropyLoss`; `SGD(lr=0.001, momentum=0.9)` только по параметрам `fc`; `StepLR(step_size=7, gamma=0.1)`; `batch_size=4`; устройство — `cuda:0`, если доступно, иначе CPU.
+5. **Выбор лучшей модели.** После каждой эпохи считается accuracy на `valid`, лучший `state_dict` загружается обратно в модель в конце обучения.
+6. **Экспорт.** `export_model()` сохраняет в `--out-dir` (по умолчанию `../server/model`):
+   - `model.pt` — модель в TorchScript (`torch.jit.script`), её загружает LibTorch без Python;
+   - `classes.txt` — имена классов по строке; номер строки = индекс выхода модели.
 
 ### server/ — веб-сервис на C++
 
-**`main.cpp`** — создаёт `boost::asio::io_context`, `HTTPServer` на порту **8001** и запускает `service.run()`.
+**`main.cpp`** — `./server [model.pt] [classes.txt] [port]` (по умолчанию `model/model.pt`, `model/classes.txt`, `8001`). Один раз загружает модель и запускает `HTTPServer`.
+
+**`ImageClassifier`** (`ImageClassification.cpp`):
+- конструктор читает `classes.txt` и загружает модель через `torch::jit::load`;
+- `predict(bytes)`: декодирует изображение через `stb_image` в RGB → тензор `1×3×H×W` в `[0, 1]` → билинейный resize до 224×224 со сглаживанием → нормализация ImageNet → `forward` в `torch::InferenceMode` → `softmax` → класс с максимальной вероятностью.
+- Предобработка повторяет `data_transforms` из Python. Если менять её в обучении, нужно поменять и здесь. Вероятности сервера совпадают с Python с точностью ~0.005: PIL масштабирует `uint8`, сервер — `float`.
 
 **`HTTPServer`** (`WebServer.cpp`):
-- `start_accept()` — асинхронно принимает соединение (`async_accept`) и после каждого снова встаёт в ожидание.
-- `handle_accept()` — если число активных задач в пуле ≥ размера пула (2), сразу отвечает `503 Service Unavailable`; иначе ставит `handle_request` в очередь пула.
-- `handle_request()` — читает до 1024 байт запроса одним `read_some`, создаёт `ImageClassifier("path/to/model/weights", 525)`, вызывает `predict()` (сейчас возвращает пустую строку и результат не используется), формирует ответ через `getLogic()` и пишет его в сокет.
-- `getLogic()` — «бизнес-логика»: берёт из сырой строки запроса всё после первого `=` и до первого пробела. По сути это **эхо значения query-параметра**: `GET /?img=bird.jpg HTTP/1.1` → тело ответа `bird.jpg`.
+- `start_accept()` / `handle_accept()` — асинхронный приём соединений; если оба потока пула заняты, сразу ответ `503`.
+- `handle_request()` — читает заголовки до `\r\n\r\n`, затем тело по `Content-Length` (не больше 10 МБ, иначе `413`), отдаёт в `getLogic()`.
+- `getLogic()` — маршрутизация: `POST /predict` → предсказание (`200`), неизвестный путь → `404`, другой метод → `405`, пустое тело или нераспознаваемое изображение → `400`. Прочие исключения → `500`. Все ответы — JSON с `Connection: close`.
 
-**`ThreadPool`** — самописный пул потоков: вектор `std::thread`, очередь `std::function<void()>`, `mutex` + `condition_variable`, счётчик `active_tasks` для отказа по перегрузке. Рабочий поток после взятия задачи вызывает `sleep(5)` — искусственная задержка 5 секунд для имитации тяжёлого инференса. Класс дополнительно наследуется от `boost::asio::thread_pool`, но его потоки не используются.
-
-**`ImageClassifier`** (`ImageClassification.cpp`) — заготовка под LibTorch: в комментариях код загрузки ResNet-18, замены `fc`, `torch::load` весов, перевода на CUDA, чтения картинки через OpenCV, `softmax` + `argmax`. Сейчас всё закомментировано, `predict()` возвращает `""`.
+**`ThreadPool`** — самописный пул из 2 потоков: очередь `std::function<void()>`, `mutex` + `condition_variable`, счётчик `active_tasks` для отказа по перегрузке. Модель одна на все потоки: вызывать `forward` TorchScript-модели из нескольких потоков одновременно безопасно.
 
 ---
 
 ## Запуск
 
-### 1. Обучение модели
+### 1. Обучение и экспорт модели
 
-Требования: Python 3.9+, PyTorch и torchvision (GPU с CUDA желательно, но не обязательно), matplotlib, numpy, Pillow.
+Требования: Python 3.10–3.13 (под системный Python 3.14 колёс PyTorch может не быть — удобнее через `uv`), PyTorch, torchvision, numpy, Pillow, matplotlib. Без GPU NVIDIA ставьте CPU-сборку — она в несколько раз меньше.
 
 ```bash
 cd training
-python -m venv .venv && source .venv/bin/activate
-pip install torch torchvision numpy matplotlib pillow
-python classification.py
+uv venv -p 3.12 .venv && source .venv/bin/activate
+uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+uv pip install numpy pillow matplotlib
+
+python classification.py                      # arch, 25 эпох
+python classification.py --epochs 2           # быстрая проверка (~3.5 мин на CPU)
+python classification.py --data-dir archive   # полный датасет, 525 классов (на CPU — часы на эпоху)
 ```
 
-Скрипт нужно запускать **из каталога `training/`**: путь к данным `arch` относительный.
+Скрипт запускается **из каталога `training/`** (пути относительные). В конце печатается:
 
-Для обучения на полном датасете в `classification.py` поменяйте:
-
-```python
-data_dir = 'archive'
+```
+Model saved to ../server/model/model.pt, classes (2) to ../server/model/classes.txt
 ```
 
-Чтобы веса остались после обучения (они понадобятся серверу), добавьте в конец скрипта:
+`torch.jit.script` в PyTorch 2.14 выдаёт `FutureWarning` о том, что TorchScript устарел. Пока он работает, это предупреждение можно игнорировать.
 
-```python
-torch.save(model_ft.state_dict(), 'resnet18_birds.pt')
+### 2. Сервер — Docker (рекомендуется)
+
+Образ сам скачивает LibTorch 2.14.1 (CPU). Модель в образ не входит — она монтируется томом:
+
+```bash
+cd server
+docker build -t cnn-server .
+docker run --rm -p 8001:8001 -v "$PWD/model":/app/model:ro cnn-server
 ```
 
-> Если нужен формат, который потом загрузит LibTorch в C++, проще всего сохранить TorchScript:
-> `torch.jit.script(model_ft.cpu().eval()).save('resnet18_birds_ts.pt')` и загружать его в C++ через `torch::jit::load`.
+Версию LibTorch можно поменять: `docker build --build-arg LIBTORCH_VERSION=2.14.1 ...`. Лучше держать её равной версии PyTorch, которым сохранена модель.
 
-### 2. Сервер — локальная сборка
+### 3. Сервер — локальная сборка
 
-Требования: g++ с поддержкой C++17, CMake ≥ 3.15, Boost (заголовки + `thread`; проверено на 1.83 и 1.90).
+Нужны: g++ с C++20, CMake ≥ 3.18, Boost (заголовки + `thread`), LibTorch.
 
 ```bash
 # Arch Linux
@@ -133,44 +146,44 @@ sudo pacman -S base-devel cmake boost
 sudo apt install build-essential cmake libboost-dev libboost-thread-dev
 ```
 
-Сборка через CMake:
+LibTorch можно взять из того же venv, где стоит PyTorch, либо скачать отдельно с https://pytorch.org (LibTorch, CPU):
 
 ```bash
 cd server
-cmake -S . -B build
-cmake --build build
-./build/server
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_PREFIX_PATH="$(../training/.venv/bin/python -c 'import torch; print(torch.utils.cmake_prefix_path)')"
+# или -DCMAKE_PREFIX_PATH=/path/to/libtorch
+cmake --build build -j
+./build/server model/model.pt model/classes.txt 8001
 ```
 
-Или напрямую через g++ (так делает Dockerfile):
+При старте сервер печатает:
 
-```bash
-cd server
-g++ -std=c++17 -o main main.cpp WebServer.cpp ImageClassification.cpp -lboost_thread -lpthread
-./main
 ```
-
-Сервер слушает `0.0.0.0:8001`.
-
-### 3. Сервер — Docker
-
-```bash
-cd server
-docker build -t cnn-server .
-docker run --rm -p 8001:8001 cnn-server
+Loaded model model/model.pt (2 classes)
+Listening on port 8001, POST /predict
 ```
 
 ### 4. Проверка
 
 ```bash
-curl "http://localhost:8001/?image=bird.jpg"
-# через ~5 секунд: bird.jpg
+curl --data-binary "@training/arch/test/BLUE GROUSE/1.jpg" http://localhost:8001/predict
+# {"class": "BLUE GROUSE", "confidence": 0.986391}
 ```
 
-Проверка отказа при перегрузке — пул на 2 потока, третий параллельный запрос получит 503:
+Ошибки:
 
 ```bash
-for i in 1 2 3; do curl -s -o /dev/null -w "%{http_code}\n" "http://localhost:8001/?n=$i" & done; wait
+curl http://localhost:8001/predict                                   # 405 Use POST ...
+curl --data-binary "not an image" http://localhost:8001/predict      # 400 Cannot decode image
+curl http://localhost:8001/foo                                       # 404
+```
+
+Перегрузка — пул на 2 потока, лишние параллельные запросы получат 503:
+
+```bash
+for i in 1 2 3 4 5 6; do curl -s -o /dev/null -w "%{http_code}\n" \
+  --data-binary "@training/arch/test/CACTUS WREN/1.jpg" http://localhost:8001/predict & done; wait
 ```
 
 ---
@@ -178,19 +191,15 @@ for i in 1 2 3; do curl -s -o /dev/null -w "%{http_code}\n" "http://localhost:80
 ## Известные проблемы и что доделать
 
 **Обучение**
-- Лучшие веса сохраняются только во временный каталог и пропадают после завершения — нужен `torch.save` в постоянный файл.
-- `data_dir = 'arch'`: в `arch/train` и `arch/valid` всего 2 класса, а выходной слой на 525 — для такого набора это работает (метки 0 и 1), но фактически обучается бинарный классификатор. Для полной задачи — `archive`.
-- Нет `if __name__ == '__main__':` — с `num_workers=4` на Windows/macOS (метод `spawn`) DataLoader упадёт.
+- По умолчанию обучение идёт на `arch` (2 класса), поэтому и сервер различает только 2 вида. Для 525 видов нужно `--data-dir archive`, на CPU это очень долго.
 - Нет аугментаций для train и нет оценки на `test`.
 - Свёрточные слои не заморожены (`requires_grad=False`), поэтому backward идёт через всю сеть впустую.
+- TorchScript помечен в PyTorch как устаревший. Если его уберут, экспорт придётся перевести на `torch.export` + AOTInductor.
 - `archive/*.h5` (EfficientNetB0, Keras) и `hymenoptera_data/` в коде не используются.
 
 **Сервер**
-- `ImageClassifier` — заглушка: LibTorch не подключён ни в `CMakeLists.txt`, ни в Dockerfile, OpenCV не подключён вовсе.
-- `ImageClassifier` создаётся заново на каждый запрос — при реальной модели её нужно загружать один раз при старте.
-- `sleep(5)` вызывается **под захваченным мьютексом**: пока один поток «спит», второй не может взять задачу, а `get_active_tasks()` в `handle_accept` блокирует поток `io_context`. Задержку стоит вынести за пределы блокировки (или убрать).
 - Размер пула захардкожен (`num_threads(2)` в конструкторе игнорирует аргумент), а наследование от `boost::asio::thread_pool` создаёт ещё 2 простаивающих потока.
-- Ответ 503 отправляется синхронным `write` в потоке приёма; сокет после ответов явно не закрывается.
-- HTTP разбирается вручную: только первые 1024 байта, без проверки метода/пути, без `Content-Type`. Загрузка самого изображения (multipart/POST) не реализована.
-- `Dockerfile` однослойный: сборочные инструменты остаются в итоговом образе. Базовый образ закреплён на `ubuntu:24.04`.
+- `get_active_tasks()` в `handle_accept` берёт мьютекс пула в потоке `io_context`, а 503 отправляется синхронным `write` там же.
+- HTTP разбирается вручную: без keep-alive, chunked encoding и multipart. Изображение передаётся сырыми байтами в теле.
+- Только CPU-инференс.
 - В git закоммичены `cmake-build-debug/`, `.idea/` и бинарники `main`/`server`. Они перечислены в `.gitignore`, но уже отслеживаемые файлы нужно один раз убрать из индекса: `git rm -r --cached server/cmake-build-debug server/.idea server/main server/server`.

@@ -1,40 +1,46 @@
 FROM ubuntu:24.04 AS build
 
+ARG LIBTORCH_VERSION=2.14.1
+
 # Установите необходимые зависимости
 RUN apt-get update && apt-get install -y \
     build-essential \
-    autoconf \
-    libtool \
-    pkg-config  \
-    g++ \
     cmake \
     wget \
+    unzip \
+    ca-certificates \
     libboost-dev \
     libboost-thread-dev \
-    libpthread-stubs0-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# LibTorch (CPU). Версия должна совпадать с PyTorch, которым сохранена модель
+RUN wget -q -O /tmp/libtorch.zip \
+    "https://download.pytorch.org/libtorch/cpu/libtorch-shared-with-deps-${LIBTORCH_VERSION}%2Bcpu.zip" \
+    && unzip -q /tmp/libtorch.zip -d /opt \
+    && rm /tmp/libtorch.zip
 
 # Установите рабочую директорию
 WORKDIR /src
 
 # Скопируйте файлы проекта в контейнер
 COPY CMakeLists.txt main.cpp WebServer.cpp WebServer.h ImageClassification.cpp ImageClassification.h ./
+COPY third_party ./third_party
 
-# Установите переменную окружения для CMAKE_PREFIX_PATH
-#ENV CMAKE_PREFIX_PATH=/usr/local/libtorch
+RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/opt/libtorch \
+    && cmake --build build -j"$(nproc)"
 
-# Создайте директорию для сборки
-RUN g++ -std=c++17 -o main main.cpp WebServer.cpp ImageClassification.cpp -lboost_thread -lpthread
+FROM ubuntu:24.04
 
-#RUN chmod +x server
+RUN apt-get update && apt-get install -y libboost-thread1.83.0 libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Библиотеки LibTorch по тому же пути, что и при сборке (RPATH)
+COPY --from=build /opt/libtorch/lib /opt/libtorch/lib
+COPY --from=build /src/build/server /app/server
+
+WORKDIR /app
 
 EXPOSE 8001
 
-# Укажите команду по умолчанию для запуска приложения
-CMD ["./main"]
-
-#FROM ubuntu:latest
-
-#WORKDIR /opt/server
-
-#COPY --from=build /src/server_demo ./
+# Модель монтируется в /app/model: model.pt + classes.txt
+CMD ["./server", "model/model.pt", "model/classes.txt", "8001"]

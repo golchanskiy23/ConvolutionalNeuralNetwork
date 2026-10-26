@@ -17,6 +17,7 @@
 #include <queue>
 #include <mutex>
 #include <condition_variable>
+#include "ImageClassification.h"
 using namespace boost::asio;
 typedef boost::shared_ptr<ip::tcp::socket> socket_ptr;
 
@@ -50,10 +51,11 @@ class ThreadPool : boost::asio::thread_pool {
 
 class HTTPServer {
   public:
-   HTTPServer(io_context& io_context, short port);
+   HTTPServer(io_context& io_context, short port, ImageClassifier& classifier);
 
   private:
-   std::string getLogic(std::string& str);
+   // business logic function
+   std::string getLogic(const std::string& method, const std::string& target, const std::string& body);
    void start_accept();
 
    void handle_accept(socket_ptr socket, const boost::system::error_code& error);
@@ -62,6 +64,7 @@ class HTTPServer {
 
    ip::tcp::acceptor acceptor_;
    io_context& io_context_;
+   ImageClassifier& classifier_;
    ThreadPool pool;
 };
 

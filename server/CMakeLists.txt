@@ -1,25 +1,24 @@
-cmake_minimum_required(VERSION 3.15 FATAL_ERROR)
+cmake_minimum_required(VERSION 3.18 FATAL_ERROR)
 project(server)
 
-#set(CMAKE_PREFIX_PATH /home/max/libtorch)
-#set(Torch_DIR "${CMAKE_SOURCE_DIR}/libtorch/share/cmake/Torch")
-#set(CMAKE_PREFIX_PATH "python3 -c 'import torch; print(torch.utils.cmake_prefix_path)'")
-#find_package(Torch REQUIRED)
-#include_directories(${TORCH_INCLUDE_DIRS})
+# Путь к LibTorch передаётся при конфигурации, например:
+#   cmake -S . -B build -DCMAKE_PREFIX_PATH=/opt/libtorch
+#   cmake -S . -B build -DCMAKE_PREFIX_PATH="$(python -c 'import torch; print(torch.utils.cmake_prefix_path)')"
+find_package(Torch REQUIRED)
+find_package(Threads REQUIRED)
+
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
+
 add_executable(server main.cpp
         ImageClassification.h
         ImageClassification.cpp
         WebServer.cpp)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
+target_include_directories(server PRIVATE third_party)
 
-set( LIBS_TO_LINK
-        ${Boost_LIBRARIES}
-        ${CMAKE_THREAD_LIBS_INIT}
-        -lboost_thread
-        -lpthread
-)
 target_link_libraries(server
-        ${LIBS_TO_LINK}
         ${TORCH_LIBRARIES}
+        -lboost_thread
+        Threads::Threads
 )
-set_property(TARGET server PROPERTY CXX_STANDARD 17)
+# LibTorch 2.x требует C++20
+set_property(TARGET server PROPERTY CXX_STANDARD 20)
