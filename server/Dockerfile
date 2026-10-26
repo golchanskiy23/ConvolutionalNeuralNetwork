@@ -1,4 +1,4 @@
-FROM ubuntu AS build
+FROM ubuntu:24.04 AS build
 
 # Установите необходимые зависимости
 RUN apt-get update && apt-get install -y \
@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y \
     g++ \
     cmake \
     wget \
-    libboost-system-dev \
+    libboost-dev \
     libboost-thread-dev \
     libpthread-stubs0-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -24,11 +24,9 @@ COPY CMakeLists.txt main.cpp WebServer.cpp WebServer.h ImageClassification.cpp I
 #ENV CMAKE_PREFIX_PATH=/usr/local/libtorch
 
 # Создайте директорию для сборки
-RUN g++ -o main main.cpp WebServer.cpp ImageClassification.cpp ImageClassification.h -lboost_system -lboost_thread -lpthread
+RUN g++ -std=c++17 -o main main.cpp WebServer.cpp ImageClassification.cpp -lboost_thread -lpthread
 
 #RUN chmod +x server
-
-RUN cmake . && cmake
 
 EXPOSE 8001
 

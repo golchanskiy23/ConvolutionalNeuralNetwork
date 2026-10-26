@@ -15,7 +15,6 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
 set( LIBS_TO_LINK
         ${Boost_LIBRARIES}
         ${CMAKE_THREAD_LIBS_INIT}
-        -lboost_system
         -lboost_thread
         -lpthread
 )

@@ -16,7 +16,7 @@
 ```
 .
 ├── server/                      # C++ веб-сервис
-│   ├── main.cpp                 # точка входа: io_service + HTTPServer на порту 8001
+│   ├── main.cpp                 # точка входа: io_context + HTTPServer на порту 8001
 │   ├── WebServer.h / .cpp       # ThreadPool и HTTPServer
 │   ├── ImageClassification.h/.cpp  # ImageClassifier (заготовка под LibTorch)
 │   ├── CMakeLists.txt
@@ -44,7 +44,7 @@
         │  GET /?<param>=<value>
         ▼
  ┌──────────────────────────── server ────────────────────────────┐
- │  boost::asio::io_service  ──►  HTTPServer::start_accept()      │
+ │  boost::asio::io_context  ──►  HTTPServer::start_accept()      │
  │                                    │ async_accept              │
  │                                    ▼                           │
  │                         HTTPServer::handle_accept()            │
@@ -78,7 +78,7 @@
 
 ### server/ — веб-сервис на C++
 
-**`main.cpp`** — создаёт `boost::asio::io_service`, `HTTPServer` на порту **8001** и запускает `service.run()`.
+**`main.cpp`** — создаёт `boost::asio::io_context`, `HTTPServer` на порту **8001** и запускает `service.run()`.
 
 **`HTTPServer`** (`WebServer.cpp`):
 - `start_accept()` — асинхронно принимает соединение (`async_accept`) и после каждого снова встаёт в ожидание.
@@ -124,13 +124,13 @@ torch.save(model_ft.state_dict(), 'resnet18_birds.pt')
 
 ### 2. Сервер — локальная сборка
 
-Требования: g++ с поддержкой C++17, CMake ≥ 3.15, Boost (`system`, `thread`).
+Требования: g++ с поддержкой C++17, CMake ≥ 3.15, Boost (заголовки + `thread`; проверено на 1.83 и 1.90).
 
 ```bash
 # Arch Linux
 sudo pacman -S base-devel cmake boost
 # Ubuntu / Debian
-sudo apt install build-essential cmake libboost-system-dev libboost-thread-dev
+sudo apt install build-essential cmake libboost-dev libboost-thread-dev
 ```
 
 Сборка через CMake:
@@ -146,7 +146,7 @@ cmake --build build
 
 ```bash
 cd server
-g++ -std=c++17 -o main main.cpp WebServer.cpp ImageClassification.cpp -lboost_system -lboost_thread -lpthread
+g++ -std=c++17 -o main main.cpp WebServer.cpp ImageClassification.cpp -lboost_thread -lpthread
 ./main
 ```
 
@@ -188,9 +188,9 @@ for i in 1 2 3; do curl -s -o /dev/null -w "%{http_code}\n" "http://localhost:80
 **Сервер**
 - `ImageClassifier` — заглушка: LibTorch не подключён ни в `CMakeLists.txt`, ни в Dockerfile, OpenCV не подключён вовсе.
 - `ImageClassifier` создаётся заново на каждый запрос — при реальной модели её нужно загружать один раз при старте.
-- `sleep(5)` вызывается **под захваченным мьютексом**: пока один поток «спит», второй не может взять задачу, а `get_active_tasks()` в `handle_accept` блокирует поток `io_service`. Задержку стоит вынести за пределы блокировки (или убрать).
+- `sleep(5)` вызывается **под захваченным мьютексом**: пока один поток «спит», второй не может взять задачу, а `get_active_tasks()` в `handle_accept` блокирует поток `io_context`. Задержку стоит вынести за пределы блокировки (или убрать).
 - Размер пула захардкожен (`num_threads(2)` в конструкторе игнорирует аргумент), а наследование от `boost::asio::thread_pool` создаёт ещё 2 простаивающих потока.
 - Ответ 503 отправляется синхронным `write` в потоке приёма; сокет после ответов явно не закрывается.
 - HTTP разбирается вручную: только первые 1024 байта, без проверки метода/пути, без `Content-Type`. Загрузка самого изображения (multipart/POST) не реализована.
-- В `Dockerfile` строка `RUN cmake . && cmake` лишняя, образ однослойный (сборочные инструменты остаются в итоговом образе).
+- `Dockerfile` однослойный: сборочные инструменты остаются в итоговом образе. Базовый образ закреплён на `ubuntu:24.04`.
 - В git закоммичены `cmake-build-debug/`, `.idea/` и бинарники `main`/`server`. Они перечислены в `.gitignore`, но уже отслеживаемые файлы нужно один раз убрать из индекса: `git rm -r --cached server/cmake-build-debug server/.idea server/main server/server`.

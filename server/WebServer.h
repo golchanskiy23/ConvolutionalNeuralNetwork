@@ -50,10 +50,9 @@ class ThreadPool : boost::asio::thread_pool {
 
 class HTTPServer {
   public:
-   HTTPServer(io_service& io_service, short port);
+   HTTPServer(io_context& io_context, short port);
 
   private:
-   // business logic function
    std::string getLogic(std::string& str);
    void start_accept();
 
@@ -62,8 +61,7 @@ class HTTPServer {
    void handle_request(socket_ptr socket);
 
    ip::tcp::acceptor acceptor_;
-   io_service& io_service_;
-   //boost::asio::thread_pool pool;
+   io_context& io_context_;
    ThreadPool pool;
 };
 

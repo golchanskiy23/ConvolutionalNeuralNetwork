@@ -90,8 +90,8 @@ typedef boost::shared_ptr<ip::tcp::socket> socket_ptr;
      return active_tasks;
    }
 
-   HTTPServer::HTTPServer(io_service& io_service, short port)
-     : acceptor_(io_service, ip::tcp::endpoint(ip::tcp::v4(), port)), io_service_(io_service), pool(2)
+   HTTPServer::HTTPServer(io_context& io_context, short port)
+     : acceptor_(io_context, ip::tcp::endpoint(ip::tcp::v4(), port)), io_context_(io_context), pool(2)
    {
      start_accept();
    }
@@ -104,7 +104,7 @@ typedef boost::shared_ptr<ip::tcp::socket> socket_ptr;
      return "HTTP/1.1 200 OK\r\nContent-Length: "+std::to_string(str.size())+"\r\n\r\n"+str;
    }
    void HTTPServer::start_accept() {
-     socket_ptr socket(new ip::tcp::socket(io_service_));
+     socket_ptr socket(new ip::tcp::socket(io_context_));
      acceptor_.async_accept(*socket,
                             [this, socket](auto && PH1) { handle_accept(socket, std::forward<decltype(PH1)>(PH1)); });
    }
